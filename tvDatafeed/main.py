@@ -6,12 +6,17 @@ import random
 import re
 import string
 import pandas as pd
-from websocket import create_connection
+from websocket import create_connection, WebSocketTimeoutException
 import requests
 import json
+from pathlib import Path
+from appdirs import user_data_dir
 
 logger = logging.getLogger(__name__)
 
+
+tokendata = Path(user_data_dir(appname="tvdata", appauthor=""), "token.2fa")
+tokendata.parent.mkdir(parents=True, exist_ok=True) 
 
 class Interval(enum.Enum):
     in_1_minute = "1"
@@ -31,15 +36,18 @@ class Interval(enum.Enum):
 
 class TvDatafeed:
     __sign_in_url = 'https://www.tradingview.com/accounts/signin/'
+    __sign_in_totp = 'https://www.tradingview.com/accounts/two-factor/signin/totp/'
     __search_url = 'https://symbol-search.tradingview.com/symbol_search/?text={}&hl=1&exchange={}&lang=en&type=&domain=production'
     __ws_headers = json.dumps({"Origin": "https://data.tradingview.com"})
+    __ws_proheaders = json.dumps({"Origin": "https://prodata.tradingview.com"})
     __signin_headers = {'Referer': 'https://www.tradingview.com'}
-    __ws_timeout = 5
+    __ws_timeout = 10
 
     def __init__(
         self,
         username: str = None,
         password: str = None,
+        pro: bool =False
     ) -> None:
         """Create TvDatafeed object
 
@@ -50,6 +58,8 @@ class TvDatafeed:
 
         self.ws_debug = False
 
+        self.pro = pro
+                
         self.token = self.__auth(username, password)
 
         if self.token is None:
@@ -63,29 +73,54 @@ class TvDatafeed:
         self.chart_session = self.__generate_chart_session()
 
     def __auth(self, username, password):
-
-        if (username is None or password is None):
-            token = None
-
-        else:
-            data = {"username": username,
-                    "password": password,
-                    "remember": "on"}
-            try:
-                response = requests.post(
-                    url=self.__sign_in_url, data=data, headers=self.__signin_headers)
-                token = response.json()['user']['auth_token']
-            except Exception as e:
-                logger.error('error while signin')
+        
+        try:
+            with open(tokendata, 'r') as f:
+                token = f.read()
+        except IOError:
+            if (username is None or password is None):
                 token = None
+
+            else:
+                data = {"username": username,
+                        "password": password,
+                        "remember": "on"}
+                try:
+                    with requests.Session() as s:
+                        response = s.post(url=self.__sign_in_url, data=data, headers=self.__signin_headers)
+                        # '{"error":"2FA_required","code":"2FA_required","message":"Second authentication factor is needed","two_factor_types":[{"name":"totp"}]}'
+                        if "2FA_required" in response.text:
+                            response = s.post(url=self.__sign_in_totp, data={"code": self.__getcode()}, headers=self.__signin_headers)
+                            token = response.json()['user']['auth_token']
+                            with open(tokendata, 'w') as f:
+                                    f.write(token)
+                        else:
+                            token = response.json()['user']['auth_token']
+
+                except Exception as e:
+                    logger.error('error while signin')
+                    token = None
 
         return token
 
+    @staticmethod
+    def __getcode():
+        print("Asking user for 2FA code")
+        code = input("Enter 2FA code: ")
+        return int(code)
+    
+    @staticmethod
+    def __delete_token():
+        tokendata.unlink()
+        self.token = None
+        raise Exception("error with token - exiting")    
+    
     def __create_connection(self):
         logging.debug("creating websocket connection")
-        self.ws = create_connection(
-            "wss://data.tradingview.com/socket.io/websocket", headers=self.__ws_headers, timeout=self.__ws_timeout
-        )
+        if self.pro:
+            self.ws = create_connection("wss://prodata.tradingview.com/socket.io/websocket", headers=self.__ws_proheaders, timeout=self.__ws_timeout)
+        else:
+             self.ws = create_connection("wss://data.tradingview.com/socket.io/websocket", headers=self.__ws_headers, timeout=self.__ws_timeout)
 
     @staticmethod
     def __filter_raw_message(text):
@@ -280,7 +315,11 @@ class TvDatafeed:
             try:
                 result = self.ws.recv()
                 raw_data = raw_data + result + "\n"
+            except WebSocketTimeoutException as e:
+                logger.error(e)
+                break
             except Exception as e:
+                self.__delete_token()
                 logger.error(e)
                 break
 
