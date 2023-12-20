@@ -40,6 +40,7 @@ class TvDatafeed:
         self,
         username: str = None,
         password: str = None,
+        verbose: int = 1
     ) -> None:
         """Create TvDatafeed object
 
@@ -54,9 +55,10 @@ class TvDatafeed:
 
         if self.token is None:
             self.token = "unauthorized_user_token"
-            logger.warning(
-                "you are using nologin method, data you access may be limited"
-            )
+            if verbose:
+                logger.warning(
+                    "you are using nologin method, data you access may be limited"
+                )
 
         self.ws = None
         self.session = self.__generate_session()
